@@ -43,7 +43,33 @@ You will need a few basic tools installed on your computer:
 
 4. Go to **Settings > Account** to update your password.
 
-## 4. Connect AI Models
+## 4. Common Docker Commands
+
+**Rebuild and restart after code changes:**
+
+```bash
+docker compose up -d --build
+```
+
+**View live logs (all services):**
+
+```bash
+docker compose logs -f
+```
+
+**View logs for Odysseus only:**
+
+```bash
+docker compose logs -f odysseus
+```
+
+**Stop all services:**
+
+```bash
+docker compose down
+```
+
+## 5. Connect AI Models
 
 Odysseus requires AI models to function, which can either be local LLMs or external APIs.
 
