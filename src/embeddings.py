@@ -41,11 +41,14 @@ class EmbeddingClient:
     """Drop-in replacement for SentenceTransformer.encode() using an HTTP API."""
 
     def __init__(self, url: Optional[str] = None, model: Optional[str] = None, api_key: Optional[str] = None):
-        self.url = url or os.getenv(
-            "EMBEDDING_URL",
-            f"http://{os.getenv('LLM_HOST', 'localhost')}:11434/v1/embeddings",
+        # `or` chains (not getenv defaults): docker-compose passes these as
+        # `${VAR:-}`, i.e. an EMPTY STRING when unset. getenv's default only
+        # fires on an absent key, so "" would build a broken client (empty URL
+        # → httpx "missing protocol"). Treat empty as unset.
+        self.url = url or os.getenv("EMBEDDING_URL") or (
+            f"http://{os.getenv('LLM_HOST', 'localhost')}:11434/v1/embeddings"
         )
-        self.model = model or os.getenv("EMBEDDING_MODEL", _DEFAULT_MODEL)
+        self.model = model or os.getenv("EMBEDDING_MODEL") or _DEFAULT_MODEL
         self.api_key = api_key or os.getenv("EMBEDDING_API_KEY")
         self._dim: Optional[int] = None
         # Short connect timeout so a DOWN embedding endpoint (e.g. Ollama not
@@ -115,7 +118,9 @@ class FastEmbedClient:
                 "embeddings server."
             ) from e
 
-        self.model = model or os.getenv("FASTEMBED_MODEL", _DEFAULT_FASTEMBED_MODEL)
+        # `or` (not getenv default): compose passes FASTEMBED_MODEL as `${VAR:-…}`
+        # but an explicitly-blank override would otherwise yield "". Empty = unset.
+        self.model = model or os.getenv("FASTEMBED_MODEL") or _DEFAULT_FASTEMBED_MODEL
         # Persistent cache under data/ so the model survives reboots and so
         # the download lands exactly where the admin panel's _is_downloaded()
         # check looks (both default to this same path).

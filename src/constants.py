@@ -55,7 +55,11 @@ MEMORY_VECTORS_DIR = os.path.join(DATA_DIR, "memory_vectors")
 
 # Paths with an intentional dedicated env override, defaulting under DATA_DIR.
 MAIL_ATTACHMENTS_DIR = os.getenv("ODYSSEUS_MAIL_ATTACHMENTS_DIR", os.path.join(DATA_DIR, "mail-attachments"))
-FASTEMBED_CACHE_DIR = os.getenv("FASTEMBED_CACHE_PATH", os.path.join(DATA_DIR, "fastembed_cache"))
+# `... or default` (not getenv's default arg): docker-compose passes
+# `FASTEMBED_CACHE_PATH=${FASTEMBED_CACHE_PATH:-}`, which sets the var to an
+# EMPTY STRING when unset. getenv's default only applies when the key is absent,
+# so an empty value would otherwise yield "" → os.makedirs("") → Errno 2.
+FASTEMBED_CACHE_DIR = os.getenv("FASTEMBED_CACHE_PATH") or os.path.join(DATA_DIR, "fastembed_cache")
 
 # Agent tool output limits (single source of truth — imported by tool_execution.py,
 # tool_implementations.py, agent_tools.py, and any other module that needs them)
