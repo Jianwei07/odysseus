@@ -123,6 +123,29 @@ async def register_builtin_servers(mcp_manager):
             continue
         asyncio.create_task(_connect_python_server(server_id, script_path, name))
 
+    # Optional Headroom compression sidecar (HTTP-MCP over SSE). Only registered
+    # when HEADROOM_MCP_URL is set — i.e. the `headroom` compose profile is up.
+    # Failures degrade gracefully (the manager logs and the tools are absent).
+    headroom_url = os.environ.get("HEADROOM_MCP_URL", "").strip()
+    if headroom_url:
+        async def _connect_headroom():
+            try:
+                ok = await mcp_manager.connect_server(
+                    server_id="headroom",
+                    name="Headroom",
+                    transport="sse",
+                    url=headroom_url,
+                )
+                if ok:
+                    logger.info(f"Built-in MCP server registered: Headroom ({headroom_url})")
+                else:
+                    logger.warning(f"Built-in MCP server failed to connect: Headroom ({headroom_url})")
+            except asyncio.CancelledError:
+                raise
+            except BaseException as e:
+                logger.warning(f"Built-in MCP server Headroom error: {type(e).__name__}: {e}")
+        asyncio.create_task(_connect_headroom())
+
     # Register NPX-based servers in the background (they take longer to start)
     npx_path = _find_npx()
     logger.info(f"NPX binary resolved to: {npx_path}")

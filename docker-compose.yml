@@ -63,6 +63,10 @@ services:
       # Find yours with:  id -u  /  id -g
       - PUID=${PUID:-1000}
       - PGID=${PGID:-1000}
+      # Optional Headroom compression sidecar. When set (and the `headroom`
+      # profile is up), Odysseus auto-registers it as a built-in HTTP-MCP server
+      # exposing headroom_compress / headroom_retrieve / headroom_stats.
+      - HEADROOM_MCP_URL=${HEADROOM_MCP_URL:-}
     depends_on:
       searxng:
         condition: service_healthy
@@ -128,6 +132,21 @@ services:
       timeout: 6s
       retries: 20
       start_period: 10s
+    restart: unless-stopped
+
+  # Optional context-compression sidecar. Opt-in via the `headroom` profile:
+  #   docker compose --profile headroom up -d
+  # Then set HEADROOM_MCP_URL=http://headroom:8096/sse in .env so Odysseus
+  # registers it as a built-in MCP server. Runs Headroom's stdio MCP server
+  # behind mcp-proxy (SSE) plus the proxy cache for retrieve. See
+  # Dockerfile.headroom + docker/headroom-entrypoint.sh.
+  headroom:
+    build:
+      context: .
+      dockerfile: Dockerfile.headroom
+    profiles: ["headroom"]
+    expose:
+      - "8096"
     restart: unless-stopped
 
   ntfy:

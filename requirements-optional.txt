@@ -34,3 +34,7 @@ PyMuPDF
 # [all]/Azure/audio extras (cloud + heavy). Pinned to a release >30 days old per
 # the dependency-age discussion in issue #485.
 markitdown[docx,pptx,xlsx,xls]==0.1.5
+
+# Note: Headroom context compression is NOT installed here. It runs in its own
+# optional sidecar container (see Dockerfile.headroom + the `headroom` compose
+# profile) and is reached over HTTP-MCP, so the Odysseus image stays lean.
