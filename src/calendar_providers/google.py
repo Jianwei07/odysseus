@@ -22,12 +22,14 @@ import httpx
 
 from .base import CalendarProvider
 from . import accounts as account_store
+from src import google_account
 
 logger = logging.getLogger(__name__)
 
 _API = "https://www.googleapis.com/calendar/v3"
-_TOKEN_URL = "https://oauth2.googleapis.com/token"
-_SCOPE = "https://www.googleapis.com/auth/calendar"
+# Token refresh + scopes now live in the shared src.google_account component;
+# _SCOPE is kept as a back-compat alias for the calendar capability's scope.
+_SCOPE = google_account.SCOPES["calendar"]
 _LOOKBACK_DAYS = 365
 _LOOKAHEAD_DAYS = 365
 
@@ -72,36 +74,8 @@ class GoogleCalendarProvider(CalendarProvider):
 
     # ── auth ────────────────────────────────────────────────────────────
     async def _access_token(self, owner: str, account: dict) -> str:
-        """Return a valid access token, refreshing + caching as needed."""
-        from src.secret_storage import decrypt
-        tok = account.get("access_token")
-        exp = account.get("access_expiry")
-        if tok and exp:
-            try:
-                if datetime.fromisoformat(exp) - timedelta(seconds=60) > datetime.utcnow():
-                    return tok
-            except ValueError:
-                pass
-        refresh = decrypt(account.get("refresh_token") or "")
-        client_id = account.get("client_id") or ""
-        client_secret = decrypt(account.get("client_secret") or "")
-        if not (refresh and client_id and client_secret):
-            raise RuntimeError("Google account not fully authorized")
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(_TOKEN_URL, data={
-                "grant_type": "refresh_token",
-                "refresh_token": refresh,
-                "client_id": client_id,
-                "client_secret": client_secret,
-            })
-        resp.raise_for_status()
-        data = resp.json()
-        account["access_token"] = data["access_token"]
-        account["access_expiry"] = (
-            datetime.utcnow() + timedelta(seconds=int(data.get("expires_in", 3600)))
-        ).isoformat()
-        account_store.upsert_account(owner, account)
-        return account["access_token"]
+        """Valid access token via the shared Google identity component."""
+        return await google_account.get_access_token(owner, account)
 
     def _account_for_calendar(self, owner: str, calendar_id: str) -> tuple[dict | None, str | None]:
         """Resolve (account, remote_gcal_id) for a local calendar id."""

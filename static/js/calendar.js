@@ -8,6 +8,7 @@ import * as Modals from './modalManager.js';
 import { makeWindowDraggable } from './windowDrag.js';
 import { attachColorPicker } from './colorPicker.js';
 import { bindMenuDismiss } from './escMenuStack.js';
+import { showGoogleConnectForm } from './google_connect.js';
 import {
   WEEKDAYS, MONTHS, MON_SHORT,
   CAL_PALETTE, CAL_COLORS, _CAL_CUSTOM_GRADIENT, _TYPE_PALETTE,
@@ -2447,7 +2448,7 @@ async function _renderCalAccounts(overlay) {
     </button>`).join('');
   listEl.querySelectorAll('.cal-acct-del').forEach(b => b.addEventListener('click', async () => {
     if (!confirm('Remove this calendar account and its events?')) return;
-    await fetch(`${API_BASE}/api/calendar/accounts/${b.dataset.id}`, { method: 'DELETE', credentials: 'same-origin' });
+    await fetch(`${API_BASE}/api/google/accounts/${b.dataset.id}`, { method: 'DELETE', credentials: 'same-origin' });
     _allEvents = {}; _fetchedRanges = []; localStorage.removeItem(LS_KEY); _render();
     _renderCalAccounts(overlay);
   }));
@@ -2459,44 +2460,10 @@ async function _renderCalAccounts(overlay) {
 }
 
 function _showGoogleConnectForm(overlay) {
+  // Delegates to the shared connect form so the calendar overlay and the
+  // Settings → Integrations panel stay byte-identical.
   const msgEl = overlay.querySelector('#cal-add-msg');
-  if (!msgEl) return;
-  const inp = 'background:none;border:1px solid var(--border);border-radius:4px;padding:5px 7px;color:var(--fg);font-size:12px;';
-  const redirect = `${window.location.origin}/api/calendar/oauth/callback`;
-  msgEl.innerHTML = `
-    <div style="display:flex;flex-direction:column;gap:6px;border:1px solid var(--border);border-radius:6px;padding:8px;">
-      <div style="font-size:11px;opacity:0.65;line-height:1.5;">Paste your Google OAuth <b>Web application</b> client. In Google Cloud Console add this redirect URI to it:<br><code style="font-size:10px;word-break:break-all;">${_e(redirect)}</code></div>
-      <input id="cal-g-label" placeholder="Label (e.g. Personal Google)" style="${inp}" />
-      <input id="cal-g-cid" placeholder="Client ID" style="${inp}" />
-      <input id="cal-g-secret" type="password" placeholder="Client Secret" style="${inp}" />
-      <button id="cal-g-connect" class="memory-toolbar-btn" style="cursor:pointer;">Connect with Google</button>
-      <div id="cal-g-status" style="font-size:11px;opacity:0.7;"></div>
-    </div>`;
-  overlay.querySelector('#cal-g-connect').addEventListener('click', async () => {
-    const status = overlay.querySelector('#cal-g-status');
-    const label = overlay.querySelector('#cal-g-label').value.trim();
-    const client_id = overlay.querySelector('#cal-g-cid').value.trim();
-    const client_secret = overlay.querySelector('#cal-g-secret').value.trim();
-    if (!client_id || !client_secret) { status.textContent = 'Client ID and secret are required.'; return; }
-    status.textContent = 'Creating account…';
-    try {
-      const r = await fetch(`${API_BASE}/api/calendar/accounts/google`, {
-        method: 'POST', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ label, client_id, client_secret }),
-      });
-      const d = await r.json().catch(() => ({}));
-      if (r.ok && d.authorize_url) {
-        status.innerHTML = 'Opening Google sign-in… After you approve, click <b>Sync now</b> below.';
-        window.open(d.authorize_url, '_blank', 'noopener');
-        _renderCalAccounts(overlay);
-      } else {
-        status.textContent = d.detail || d.error || 'Failed to create account.';
-      }
-    } catch (e) {
-      status.textContent = 'Request failed.';
-    }
-  });
+  showGoogleConnectForm(msgEl, { onCreated: () => _renderCalAccounts(overlay) });
 }
 
 async function _showCalSettings() {

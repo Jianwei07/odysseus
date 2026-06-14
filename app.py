@@ -668,6 +668,10 @@ from routes.calendar_routes import setup_calendar_routes
 calendar_router = setup_calendar_routes()
 app.include_router(calendar_router)
 
+# Shared Google OAuth + account API (single sign-in for Calendar, later Gmail)
+from routes.google_routes import router as google_router
+app.include_router(google_router)
+
 # Shell (user-facing command execution)
 from routes.shell_routes import setup_shell_routes
 app.include_router(setup_shell_routes())
