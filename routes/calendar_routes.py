@@ -843,13 +843,24 @@ def setup_calendar_routes() -> APIRouter:
             return {"ok": False, "error": str(e)[:200]}
 
     @router.post("/sync")
-    async def sync_caldav_endpoint(request: Request):
-        """Pull events from the configured CalDAV server into local DB.
-        Returns counts + any per-calendar errors. Called by the frontend
-        on calendar open and by the periodic scheduler loop."""
+    async def sync_calendars_endpoint(request: Request):
+        """Pull events from every configured remote (CalDAV, Google, …) into the
+        local DB. Returns merged counts + any per-calendar errors. Called by the
+        frontend on calendar open and by the periodic scheduler loop. Providers
+        with no configured account no-op cheaply."""
         owner = _require_user(request)
-        from src.caldav_sync import sync_caldav
-        return await sync_caldav(owner)
+        from src.calendar_providers.registry import all_providers
+        merged = {"calendars": 0, "events": 0, "deleted": 0, "errors": []}
+        for provider in all_providers():
+            try:
+                res = await provider.sync(owner)
+            except Exception as e:
+                merged["errors"].append(f"{provider.id}: {str(e)[:200]}")
+                continue
+            for k in ("calendars", "events", "deleted"):
+                merged[k] += int(res.get(k, 0) or 0)
+            merged["errors"].extend(res.get("errors", []) or [])
+        return merged
 
 
     @router.delete("/calendars/{cal_id}")
@@ -1005,16 +1016,16 @@ def setup_calendar_routes() -> APIRouter:
             )
             db.add(ev)
             db.commit()
-            if cal.source == "caldav":
-                # Push the new event to the remote so it appears on the user's
-                # other devices — the sync is otherwise pull-only (#800).
-                from src.caldav_writeback import writeback_event
-                await writeback_event(owner, cal.source, cal.id, {
-                    "uid": uid, "summary": data.summary, "description": data.description,
-                    "location": data.location, "dtstart": dtstart, "dtend": dtend,
-                    "all_day": data.all_day, "is_utc": _is_utc and not data.all_day,
-                    "rrule": data.rrule or "",
-                })
+            # Push the new event to the calendar's remote (if any) so it appears
+            # on the user's other devices — the sync is otherwise pull-only
+            # (#800). Local calendars resolve to a no-op provider.
+            from src.calendar_providers import get_provider
+            await get_provider(cal.source).push_create(owner, cal.id, {
+                "uid": uid, "summary": data.summary, "description": data.description,
+                "location": data.location, "dtstart": dtstart, "dtend": dtend,
+                "all_day": data.all_day, "is_utc": _is_utc and not data.all_day,
+                "rrule": data.rrule or "",
+            })
             return {"ok": True, "uid": uid}
         except HTTPException:
             raise
@@ -1062,9 +1073,9 @@ def setup_calendar_routes() -> APIRouter:
                 ev.color = data.color if data.color else None
             db.commit()
             cal = db.query(CalendarCal).filter(CalendarCal.id == ev.calendar_id).first()
-            if cal and cal.source == "caldav":
-                from src.caldav_writeback import writeback_event
-                await writeback_event(owner, cal.source, cal.id, {
+            if cal:
+                from src.calendar_providers import get_provider
+                await get_provider(cal.source).push_update(owner, cal.id, {
                     "uid": ev.uid, "summary": ev.summary, "description": ev.description,
                     "location": ev.location, "dtstart": ev.dtstart, "dtend": ev.dtend,
                     "all_day": ev.all_day, "is_utc": ev.is_utc, "rrule": ev.rrule or "",
@@ -1091,13 +1102,13 @@ def setup_calendar_routes() -> APIRouter:
             ev = _get_or_404_event(db, base_uid, owner)
             # Capture what the remote push needs BEFORE the row is gone.
             _cal = db.query(CalendarCal).filter(CalendarCal.id == ev.calendar_id).first()
-            _is_caldav = bool(_cal and _cal.source == "caldav")
+            _cal_source = _cal.source if _cal else None
             _cal_id, _ev_uid = ev.calendar_id, ev.uid
             db.delete(ev)
             db.commit()
-            if _is_caldav:
-                from src.caldav_writeback import writeback_event
-                await writeback_event(owner, "caldav", _cal_id, {"uid": _ev_uid}, delete=True)
+            if _cal_source:
+                from src.calendar_providers import get_provider
+                await get_provider(_cal_source).push_delete(owner, _cal_id, _ev_uid)
             return {"ok": True}
         except HTTPException:
             raise
@@ -1505,4 +1516,177 @@ def setup_calendar_routes() -> APIRouter:
             "confidence": float(parsed.get("confidence", 0.7) or 0.7),
         }
 
+    # ── Provider registry + OAuth-account management ─────────────────────────
+    # Powers the "+ Add Calendar" picker. CalDAV keeps its existing
+    # /config/accounts API; these endpoints handle the OAuth providers (Google,
+    # later Outlook) whose accounts live in the `calendar_accounts` pref store.
+
+    @router.get("/providers")
+    async def list_providers(request: Request):
+        """Backends the picker can offer (id/label/auth_type/enabled)."""
+        _require_user(request)
+        from src.calendar_providers import available_providers
+        return {"providers": available_providers()}
+
+    @router.get("/accounts")
+    async def list_calendar_accounts(request: Request):
+        """Unified account list across providers (secrets never returned)."""
+        owner = _require_user(request)
+        from src.calendar_providers import accounts as account_store
+        out = []
+        for acc in _get_caldav_accounts(owner):
+            out.append({
+                "id": acc.get("id", ""), "provider": "caldav",
+                "label": acc.get("label", "") or acc.get("url", "") or "CalDAV",
+                "connected": True,
+            })
+        out.extend(account_store.safe_view(a) for a in account_store.load_accounts(owner))
+        return {"accounts": out}
+
+    @router.post("/accounts/google")
+    async def add_google_account(request: Request):
+        """Create a Google account shell from the user's OAuth client creds.
+        Returns the account id + an authorize URL to complete OAuth consent."""
+        owner = _require_user(request)
+        from src.calendar_providers import accounts as account_store
+        from src.secret_storage import encrypt
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        client_id = (body.get("client_id") or "").strip()
+        client_secret = (body.get("client_secret") or "").strip()
+        if not (client_id and client_secret):
+            raise HTTPException(400, "client_id and client_secret are required")
+        acc = account_store.upsert_account(owner, {
+            "provider": "google",
+            "label": (body.get("label") or "Google Calendar").strip(),
+            "client_id": client_id,
+            "client_secret": encrypt(client_secret),
+        })
+        return {"ok": True, "id": acc["id"],
+                "authorize_url": f"/api/calendar/oauth/authorize/{acc['id']}"}
+
+    @router.delete("/accounts/{account_id}")
+    async def delete_calendar_account(account_id: str, request: Request):
+        """Delete an OAuth account and the local calendars/events it owned."""
+        owner = _require_user(request)
+        from src.calendar_providers import accounts as account_store
+        if not account_store.get_account(owner, account_id):
+            raise HTTPException(404, "Account not found")
+        db = SessionLocal()
+        try:
+            cals = db.query(CalendarCal).filter(
+                CalendarCal.owner == owner, CalendarCal.account_id == account_id).all()
+            for cal in cals:
+                db.query(CalendarEvent).filter(CalendarEvent.calendar_id == cal.id).delete()
+                db.delete(cal)
+            db.commit()
+        finally:
+            db.close()
+        account_store.delete_account(owner, account_id)
+        return {"ok": True}
+
+    # ── Google OAuth (web flow; redirect URI derived from the request origin) ──
+
+    def _calendar_redirect_uri(request: Request) -> str:
+        return str(request.base_url).rstrip("/") + "/api/calendar/oauth/callback"
+
+    @router.get("/oauth/authorize/{account_id}")
+    async def google_oauth_authorize(account_id: str, request: Request):
+        """Redirect the user to Google's consent screen for this account."""
+        import urllib.parse
+        from fastapi.responses import RedirectResponse
+        from src.calendar_providers import accounts as account_store
+        from src.calendar_providers.google import _SCOPE
+        owner = _require_user(request)
+        acc = account_store.get_account(owner, account_id)
+        if not acc:
+            raise HTTPException(404, "Account not found")
+        params = {
+            "client_id": acc["client_id"],
+            "redirect_uri": _calendar_redirect_uri(request),
+            "response_type": "code",
+            "scope": _SCOPE,
+            "access_type": "offline",
+            "prompt": "consent",
+            "state": account_id,
+        }
+        return RedirectResponse(
+            "https://accounts.google.com/o/oauth2/v2/auth?" + urllib.parse.urlencode(params))
+
+    @router.get("/oauth/callback")
+    async def google_oauth_callback(code: str, state: str, request: Request):
+        """Exchange the auth code for tokens, store the refresh token, sync."""
+        import html
+        import httpx
+        from fastapi.responses import HTMLResponse
+        from src.calendar_providers import accounts as account_store, get_provider
+        from src.secret_storage import encrypt, decrypt
+        owner = _require_user(request)
+        acc = account_store.get_account(owner, state)
+        if not acc:
+            return HTMLResponse(_calendar_oauth_page("Error", "Account not found."), status_code=404)
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post("https://oauth2.googleapis.com/token", data={
+                    "code": code,
+                    "client_id": acc["client_id"],
+                    "client_secret": decrypt(acc.get("client_secret") or ""),
+                    "redirect_uri": _calendar_redirect_uri(request),
+                    "grant_type": "authorization_code",
+                })
+            if resp.status_code != 200:
+                return HTMLResponse(_calendar_oauth_page(
+                    "Authorization Failed", html.escape(resp.text[:300])), status_code=400)
+            tokens = resp.json()
+            refresh = tokens.get("refresh_token")
+            if not refresh:
+                return HTMLResponse(_calendar_oauth_page(
+                    "Authorization Failed",
+                    "Google did not return a refresh token. Remove the app's access at "
+                    "myaccount.google.com/permissions and try again."), status_code=400)
+            acc["refresh_token"] = encrypt(refresh)
+            if tokens.get("access_token"):
+                from datetime import datetime as _dt, timedelta as _td
+                acc["access_token"] = tokens["access_token"]
+                acc["access_expiry"] = (_dt.utcnow() + _td(seconds=int(tokens.get("expires_in", 3600)))).isoformat()
+            account_store.upsert_account(owner, acc)
+        except Exception as e:
+            logger.exception("Google calendar OAuth exchange failed")
+            return HTMLResponse(_calendar_oauth_page("Error", html.escape(str(e)[:300])), status_code=500)
+        # Initial sync (best-effort) so events show up immediately.
+        try:
+            await get_provider("google").sync(owner)
+        except Exception:
+            logger.warning("Initial Google calendar sync failed", exc_info=True)
+        return HTMLResponse(_calendar_oauth_page(
+            "Connected", "Google Calendar is connected. You can close this window and return to Odysseus.",
+            success=True))
+
     return router
+
+
+def _calendar_oauth_page(title: str, message: str, success: bool = False) -> str:
+    """Minimal OAuth result page (mirrors routes/mcp_routes._oauth_result_page)."""
+    import html as _html
+    safe_title = _html.escape(title)
+    safe_message = _html.escape(message)
+    color = "#00661a" if success else "#e06c75"
+    icon = "&#10003;" if success else "&#10007;"
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>{safe_title}</title>
+<style>
+  body {{ font-family: 'Fira Code', monospace; background: #0f0f0f; color: #e0e0e0;
+    display: flex; justify-content: center; align-items: center; min-height: 100vh; }}
+  .card {{ background: #1a1a1a; border: 1px solid #333; border-radius: 12px;
+    padding: 2rem; max-width: 420px; text-align: center; }}
+  .icon {{ font-size: 3rem; color: {color}; margin-bottom: 1rem; }}
+  h2 {{ color: {color}; margin-bottom: 0.5rem; font-size: 1.1rem; }}
+  p {{ color: #aaa; font-size: 0.85rem; line-height: 1.5; }}
+</style></head>
+<body><div class="card">
+  <div class="icon">{icon}</div>
+  <h2>{safe_title}</h2>
+  <p>{safe_message}</p>
+</div></body></html>"""

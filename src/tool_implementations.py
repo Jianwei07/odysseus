@@ -1836,6 +1836,17 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
                     dtstart_is_utc and not all_day,
                 )
             db.commit()
+            # Write through to the calendar's remote (CalDAV/Google) so agent-
+            # created events reach the user's other devices. Local => no-op.
+            from src.calendar_providers import get_provider
+            await get_provider(cal.source).push_create(owner, cal.id, {
+                "uid": uid, "summary": summary,
+                "description": _event_description(args, minutes_before),
+                "location": args.get("location", "") or "",
+                "dtstart": dtstart, "dtend": dtend, "all_day": all_day,
+                "is_utc": dtstart_is_utc and not all_day,
+                "rrule": args.get("rrule", "") or "",
+            })
             tag_blurb = f" [{event_type}]" if event_type else ""
             if minutes_before is None:
                 reminder_blurb = ""
@@ -1894,6 +1905,14 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
             if args.get("importance") is not None:
                 ev.importance = args["importance"]
             db.commit()
+            _cal = db.query(CalendarCal).filter(CalendarCal.id == ev.calendar_id).first()
+            if _cal:
+                from src.calendar_providers import get_provider
+                await get_provider(_cal.source).push_update(owner, _cal.id, {
+                    "uid": ev.uid, "summary": ev.summary, "description": ev.description,
+                    "location": ev.location, "dtstart": ev.dtstart, "dtend": ev.dtend,
+                    "all_day": ev.all_day, "is_utc": ev.is_utc, "rrule": ev.rrule or "",
+                })
             return {"response": f"Updated event {uid}", "exit_code": 0}
 
         elif action == "delete_event":
@@ -1907,8 +1926,13 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
             ev = _event_query().filter(CalendarEvent.uid == base_uid).first()
             if not ev:
                 return {"error": f"Event {uid} not found", "exit_code": 1}
+            _cal = db.query(CalendarCal).filter(CalendarCal.id == ev.calendar_id).first()
+            _cal_source, _cal_id, _ev_uid = (_cal.source if _cal else None), ev.calendar_id, ev.uid
             db.delete(ev)
             db.commit()
+            if _cal_source:
+                from src.calendar_providers import get_provider
+                await get_provider(_cal_source).push_delete(owner, _cal_id, _ev_uid)
             return {"response": f"Deleted event {uid}", "exit_code": 0}
 
         else:

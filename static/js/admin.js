@@ -1543,14 +1543,23 @@ const MCP_PRESETS = [
     help: "Works with any IMAP/SMTP email provider.\n1. Pick your provider from the dropdown (or choose Custom)\n2. Enter your email address and password (or app password)\n3. Click Add Server" },
   { name: "CalDAV (Radicale/Nextcloud)", command: "npx", args: ["-y", "caldav-mcp"],                     env: { CALDAV_BASE_URL: "http://localhost:5232", CALDAV_USERNAME: "", CALDAV_PASSWORD: "" },
     help: "Works with any CalDAV server (Radicale, Nextcloud, etc.).\n1. Enter your CalDAV server URL (e.g. http://localhost:5232)\n2. Enter your username and password\n3. Click Add Server" },
-  { name: "Google Calendar", command: "npx", args: ["-y", "@cocal/google-calendar-mcp"],                 env: { GOOGLE_OAUTH_CREDENTIALS: "" },
-    help: `Setup:
-1. Go to console.cloud.google.com > create/select a project
+  { name: "Google Calendar", command: "npx", args: ["-y", "@cocal/google-calendar-mcp"],                 env: { GOOGLE_OAUTH_CREDENTIALS: "/app/data/mcp_oauth/gcal/gcp-oauth.keys.json", GOOGLE_CALENDAR_MCP_TOKEN_PATH: "/app/data/mcp_oauth/gcal/tokens.json" },
+    help: `Docker setup (auth once on the host, container reads the token):
+1. console.cloud.google.com > create/select a project
 2. APIs & Services > Library > enable Google Calendar API
-3. APIs & Services > Credentials > + Create Credentials > OAuth Client ID
-4. Application type: Desktop App > Create
-5. Click "Download JSON" on the credential you just created
-6. Set Google Oauth Credentials to the full path of the downloaded JSON file` },
+3. OAuth consent screen > External; add your Google address as a test user
+4. Credentials > + Create Credentials > OAuth Client ID > Desktop App > Create
+5. Download JSON, then place it under the bind-mounted data dir:
+     mkdir -p data/mcp_oauth/gcal
+     cp ~/Downloads/client_secret_*.json data/mcp_oauth/gcal/gcp-oauth.keys.json
+6. Mint the token once on the host (needs node; a browser opens to sign in):
+     GOOGLE_OAUTH_CREDENTIALS=./data/mcp_oauth/gcal/gcp-oauth.keys.json \\
+     GOOGLE_CALENDAR_MCP_TOKEN_PATH=./data/mcp_oauth/gcal/tokens.json \\
+     npx -y @cocal/google-calendar-mcp auth
+7. Click Add Server. The env paths above are container paths under /app/data,
+   which is the same bind-mounted ./data dir — leave them as-is.
+The stdio server can't run the browser auth itself, so the one-time host step
+in 6 is what produces tokens.json; the server just loads it.` },
   { name: "Google Drive",    command: "npx", args: ["-y", "@modelcontextprotocol/server-gdrive"],        env: {},
     help: "Google Drive uses browser-based OAuth on first run. No env vars needed — just click Add and authorize when prompted." },
   { name: "GitHub",          command: "npx", args: ["-y", "@modelcontextprotocol/server-github"],        env: { GITHUB_PERSONAL_ACCESS_TOKEN: "" },

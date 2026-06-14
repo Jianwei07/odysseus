@@ -2415,6 +2415,90 @@ if (typeof window !== 'undefined' && !window._calUndoBound) {
 
 // ── Calendar Settings ──
 
+// Populate the "+ Add Calendar" section: connected OAuth accounts + a provider
+// picker driven by GET /api/calendar/providers. Google opens an inline OAuth
+// connect form; CalDAV defers to the existing Integrations flow; disabled
+// providers (Outlook) render greyed out.
+async function _renderCalAccounts(overlay) {
+  const listEl = overlay.querySelector('#cal-accounts-list');
+  const pickEl = overlay.querySelector('#cal-provider-picker');
+  const msgEl = overlay.querySelector('#cal-add-msg');
+  if (!listEl || !pickEl) return;
+  let providers = [], accounts = [];
+  try {
+    const [pr, ac] = await Promise.all([
+      fetch(`${API_BASE}/api/calendar/providers`, { credentials: 'same-origin' }).then(r => r.json()),
+      fetch(`${API_BASE}/api/calendar/accounts`, { credentials: 'same-origin' }).then(r => r.json()),
+    ]);
+    providers = pr.providers || [];
+    accounts = ac.accounts || [];
+  } catch (e) {
+    if (msgEl) msgEl.textContent = 'Failed to load calendar providers.';
+    return;
+  }
+  listEl.innerHTML = accounts.length ? accounts.map(a => `
+    <div style="display:flex;align-items:center;gap:8px;font-size:12px;">
+      <span style="flex:1;">${_e(a.label)} <span style="opacity:0.5;">(${_e(a.provider)})</span>${a.connected ? '' : ' <span style="color:var(--accent, var(--red));">needs auth</span>'}</span>
+      ${a.provider !== 'caldav' ? `<button class="memory-toolbar-btn cal-acct-del" data-id="${_e(a.id)}" style="cursor:pointer;">Remove</button>` : ''}
+    </div>`).join('') : `<div style="font-size:11px;opacity:0.45;">No external calendars connected.</div>`;
+  pickEl.innerHTML = providers.map(p => `
+    <button class="memory-toolbar-btn cal-prov-btn" data-prov="${_e(p.id)}" ${p.enabled ? 'style="cursor:pointer;"' : 'disabled style="opacity:0.4;cursor:not-allowed;"'}>
+      + ${_e(p.label)}${p.enabled ? '' : ' (soon)'}
+    </button>`).join('');
+  listEl.querySelectorAll('.cal-acct-del').forEach(b => b.addEventListener('click', async () => {
+    if (!confirm('Remove this calendar account and its events?')) return;
+    await fetch(`${API_BASE}/api/calendar/accounts/${b.dataset.id}`, { method: 'DELETE', credentials: 'same-origin' });
+    _allEvents = {}; _fetchedRanges = []; localStorage.removeItem(LS_KEY); _render();
+    _renderCalAccounts(overlay);
+  }));
+  pickEl.querySelectorAll('.cal-prov-btn').forEach(b => b.addEventListener('click', () => {
+    const prov = b.dataset.prov;
+    if (prov === 'google') _showGoogleConnectForm(overlay);
+    else if (prov === 'caldav') overlay.querySelector('#cal-settings-open-caldav')?.click();
+  }));
+}
+
+function _showGoogleConnectForm(overlay) {
+  const msgEl = overlay.querySelector('#cal-add-msg');
+  if (!msgEl) return;
+  const inp = 'background:none;border:1px solid var(--border);border-radius:4px;padding:5px 7px;color:var(--fg);font-size:12px;';
+  const redirect = `${window.location.origin}/api/calendar/oauth/callback`;
+  msgEl.innerHTML = `
+    <div style="display:flex;flex-direction:column;gap:6px;border:1px solid var(--border);border-radius:6px;padding:8px;">
+      <div style="font-size:11px;opacity:0.65;line-height:1.5;">Paste your Google OAuth <b>Web application</b> client. In Google Cloud Console add this redirect URI to it:<br><code style="font-size:10px;word-break:break-all;">${_e(redirect)}</code></div>
+      <input id="cal-g-label" placeholder="Label (e.g. Personal Google)" style="${inp}" />
+      <input id="cal-g-cid" placeholder="Client ID" style="${inp}" />
+      <input id="cal-g-secret" type="password" placeholder="Client Secret" style="${inp}" />
+      <button id="cal-g-connect" class="memory-toolbar-btn" style="cursor:pointer;">Connect with Google</button>
+      <div id="cal-g-status" style="font-size:11px;opacity:0.7;"></div>
+    </div>`;
+  overlay.querySelector('#cal-g-connect').addEventListener('click', async () => {
+    const status = overlay.querySelector('#cal-g-status');
+    const label = overlay.querySelector('#cal-g-label').value.trim();
+    const client_id = overlay.querySelector('#cal-g-cid').value.trim();
+    const client_secret = overlay.querySelector('#cal-g-secret').value.trim();
+    if (!client_id || !client_secret) { status.textContent = 'Client ID and secret are required.'; return; }
+    status.textContent = 'Creating account…';
+    try {
+      const r = await fetch(`${API_BASE}/api/calendar/accounts/google`, {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ label, client_id, client_secret }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (r.ok && d.authorize_url) {
+        status.innerHTML = 'Opening Google sign-in… After you approve, click <b>Sync now</b> below.';
+        window.open(d.authorize_url, '_blank', 'noopener');
+        _renderCalAccounts(overlay);
+      } else {
+        status.textContent = d.detail || d.error || 'Failed to create account.';
+      }
+    } catch (e) {
+      status.textContent = 'Request failed.';
+    }
+  });
+}
+
 async function _showCalSettings() {
   const existing = document.getElementById('cal-settings-panel');
   if (existing) { existing.remove(); return; }
@@ -2449,6 +2533,12 @@ async function _showCalSettings() {
             <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--accent, var(--red))" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px;"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
             New calendar
           </button>
+        </div>
+        <div id="cal-add-section" style="border-top:1px solid var(--border);padding-top:12px;">
+          <div style="font-size:11px;opacity:0.5;margin-bottom:6px;">Add calendar</div>
+          <div id="cal-accounts-list" style="display:flex;flex-direction:column;gap:6px;"></div>
+          <div id="cal-provider-picker" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;"></div>
+          <div id="cal-add-msg" style="font-size:11px;opacity:0.7;margin-top:6px;"></div>
         </div>
         <div style="border-top:1px solid var(--border);padding-top:12px;">
           <div style="font-size:11px;opacity:0.5;margin-bottom:6px;">Import calendar</div>
@@ -2493,6 +2583,9 @@ async function _showCalSettings() {
   const cleanup = () => overlay.remove();
   overlay.querySelector('#cal-settings-close').addEventListener('click', cleanup);
   overlay.addEventListener('click', (e) => { if (e.target === overlay) cleanup(); });
+
+  // Populate the "+ Add Calendar" provider picker + connected-accounts list.
+  _renderCalAccounts(overlay);
 
   // Create a new (local) calendar. Defaults the name + next palette color, then
   // reopens the panel so the user can rename it inline and pick a color.
